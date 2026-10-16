@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Environment variables
+.env
+.env*.local
+
+# Personal Resume and Generated Files
+resume*.txt
+resume*.html
+!resume.example.txt
+
+# Chrome User Data (session, cache, cookies)
+chrome-data/
+
+# Next.js build output
+.next/
+out/
+ui/.next/
+ui/out/
+
+# Build artifacts & logs
+generated/
+dist/
+build/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# TypeScript
+*.tsbuildinfo
+
+# OS metadata
+.DS_Store
+Thumbs.db

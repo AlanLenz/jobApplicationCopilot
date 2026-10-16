@@ -1,0 +1,28 @@
+JOHN DOE
+Full Stack Engineer
+john.doe@example.com • +1 (555) 000-0000 • City/State, Country • https://linkedin.com/in/johndoe • https://github.com/johndoe
+
+PROFESSIONAL SUMMARY
+Full Stack Engineer with 5+ years of experience designing and deploying scalable web applications and distributed systems. Proficient in TypeScript, React, Next.js, Node.js, and Java, with strong expertise in PostgreSQL and cloud environments. Experience collaborating in Agile teams and utilizing AI-assisted workflows to accelerate development and improve code quality.
+
+TECHNICAL SKILLS
+- Frontend: React, Next.js, TypeScript, JavaScript, Tailwind CSS, HTML5, CSS3
+- Backend: Node.js, Express, Java, Spring Boot, RESTful APIs
+- Databases: PostgreSQL, MySQL, Redis, Prisma ORM
+- DevOps & Tools: Docker, Git, GitHub Actions, CI/CD, Linux
+
+PROFESSIONAL EXPERIENCE
+Senior / Mid Full Stack Developer — Tech Solutions Inc.
+January 2022 – Present
+- Architected and maintained modern web applications using React, Next.js, and TypeScript, improving page performance by 40%.
+- Designed resilient backend services and REST APIs with Node.js and PostgreSQL.
+- Collaborated in cross-functional Agile sprints, conducting code reviews and mentoring junior developers.
+
+Software Developer — Digital Innovations Ltd.
+June 2019 – December 2021
+- Developed responsive front-end user interfaces and interactive dashboards using modern JavaScript and CSS.
+- Automated testing and continuous integration pipelines, reducing deployment rollback rates.
+
+EDUCATION & CERTIFICATIONS
+- B.S. in Computer Science — University of Technology (2015 – 2019)
+- Professional Certifications / Languages
