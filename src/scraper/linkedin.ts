@@ -6,9 +6,162 @@ import path from 'path';
 chromium.use(stealth());
 const prisma = new PrismaClient();
 
-export const DEFAULT_SEARCH_KEYWORDS = '("Desenvolvedor" OR "Developer" OR "Software Engineer" OR "Engenheiro de Software") AND ("Junior" OR "Jr" OR "Pleno" OR "Mid level" OR "Mid-level") NOT ("Senior" OR "Sr" OR "Lead" OR "Principal" OR "Staff")';
+export const ROLE_BOOLEAN_MAP: Record<string, string> = {
+  software_engineer: '"Desenvolvedor" OR "Developer" OR "Software Engineer" OR "Engenheiro de Software"',
+  fullstack: '"Full Stack" OR "Fullstack" OR "Desenvolvedor Full Stack" OR "Full Stack Developer" OR "Full Stack Engineer"',
+  frontend: '"Frontend" OR "Front-end" OR "Desenvolvedor Front-end" OR "Frontend Developer" OR "Frontend Engineer" OR "React Developer"',
+  backend: '"Backend" OR "Back-end" OR "Desenvolvedor Back-end" OR "Backend Developer" OR "Backend Engineer"',
+  mobile: '"Mobile Developer" OR "Desenvolvedor Mobile" OR "React Native" OR "Flutter" OR "iOS Developer" OR "Android Developer"',
+  devops: '"DevOps" OR "SRE" OR "Site Reliability Engineer" OR "Cloud Engineer" OR "Platform Engineer"',
+  data: '"Data Engineer" OR "Engenheiro de Dados" OR "Data Scientist" OR "Cientista de Dados" OR "Data Analyst"',
+  ai_ml: '"AI Engineer" OR "Machine Learning Engineer" OR "Engenheiro de IA" OR "LLM" OR "GenAI"',
+  qa: '"QA" OR "Quality Assurance" OR "Analista de Testes" OR "Test Automation" OR "SDET"',
+  tech_lead: '"Tech Lead" OR "Software Architect" OR "Arquiteto de Software" OR "Staff Engineer" OR "Engineering Manager"',
+};
 
-export async function scrapeLinkedInJobs(keywords: string = DEFAULT_SEARCH_KEYWORDS, location: string = 'Worldwide', maxPages = 3, timeRangeSeconds = 86400) {
+export const BASE_ROLE_KEYWORDS = `(${ROLE_BOOLEAN_MAP.software_engineer})`;
+export const DEFAULT_SEARCH_KEYWORDS = `${BASE_ROLE_KEYWORDS} AND ("Junior" OR "Jr" OR "Pleno" OR "Mid level" OR "Mid-level") NOT ("Senior" OR "Sr" OR "Lead" OR "Principal" OR "Staff")`;
+
+export interface LinkedInSearchOptions {
+  roles?: string[];
+  keywords?: string;
+  seniority?: string; // 'all' | 'internship' | 'junior' | 'pleno' | 'jr-pleno' | 'senior'
+  location?: string;
+  timeRangeSeconds?: number; // e.g., 86400 (24h), 604800 (7d), 2592000 (30d), 0 (any)
+  workplaceType?: string; // 'all' | 'remote' | 'hybrid' | 'onsite'
+  maxPages?: number;
+}
+
+export function buildRolesBooleanClause(roles?: string[]): string {
+  if (!roles || roles.length === 0) {
+    return BASE_ROLE_KEYWORDS;
+  }
+
+  const expressions = roles
+    .map((r) => r.trim())
+    .filter(Boolean)
+    .map((roleKey) => {
+      if (ROLE_BOOLEAN_MAP[roleKey]) {
+        return ROLE_BOOLEAN_MAP[roleKey];
+      }
+      const sanitized = roleKey.replace(/"/g, '').trim();
+      return `"${sanitized}"`;
+    });
+
+  if (expressions.length === 0) {
+    return BASE_ROLE_KEYWORDS;
+  }
+
+  return `(${expressions.join(' OR ')})`;
+}
+
+export function buildBooleanSearchQuery(roles?: string[], seniority = 'all'): { finalKeywords: string; f_E: string } {
+  const roleClause = buildRolesBooleanClause(roles);
+  let finalKeywords = roleClause;
+  let f_E = '';
+
+  switch (seniority) {
+    case 'internship':
+      finalKeywords = `${roleClause} AND ("Estágio" OR "Estagiário" OR "Intern" OR "Internship" OR "Trainee")`;
+      f_E = '1';
+      break;
+    case 'junior':
+    case 'entry':
+      finalKeywords = `${roleClause} AND ("Junior" OR "Júnior" OR "Jr" OR "Entry Level" OR "Entry-level") NOT ("Senior" OR "Sr" OR "Pleno" OR "Lead" OR "Staff")`;
+      f_E = '2';
+      break;
+    case 'pleno':
+    case 'mid':
+      finalKeywords = `${roleClause} AND ("Pleno" OR "Mid level" OR "Mid-level" OR "Middle") NOT ("Senior" OR "Sr" OR "Lead" OR "Principal" OR "Staff")`;
+      f_E = '3,4';
+      break;
+    case 'jr-pleno':
+      finalKeywords = `${roleClause} AND ("Junior" OR "Jr" OR "Pleno" OR "Mid level" OR "Mid-level") NOT ("Senior" OR "Sr" OR "Lead" OR "Principal" OR "Staff")`;
+      f_E = '2,3,4';
+      break;
+    case 'senior':
+      finalKeywords = `${roleClause} AND ("Senior" OR "Sênior" OR "Sr" OR "Lead" OR "Staff" OR "Principal" OR "Especialista")`;
+      f_E = '4,5';
+      break;
+    case 'all':
+    default:
+      finalKeywords = roleClause;
+      f_E = '';
+      break;
+  }
+
+  return { finalKeywords, f_E };
+}
+
+export function buildLinkedInSearchUrl(options: LinkedInSearchOptions): string {
+  const {
+    roles,
+    keywords,
+    seniority = 'all',
+    location = 'Worldwide',
+    timeRangeSeconds = 86400,
+    workplaceType = 'all',
+  } = options;
+
+  const built = buildBooleanSearchQuery(roles, seniority);
+  const finalKeywords = keywords?.trim() ? keywords.trim() : built.finalKeywords;
+  const f_E = built.f_E;
+
+  // LinkedIn f_WT codes: 1=On-site (Presencial), 2=Remote (Remoto), 3=Hybrid (Híbrido)
+  let f_WT = '';
+  switch (workplaceType) {
+    case 'onsite':
+    case 'presencial':
+    case '1':
+      f_WT = '1';
+      break;
+    case 'remote':
+    case 'remoto':
+    case '2':
+      f_WT = '2';
+      break;
+    case 'hybrid':
+    case 'hibrido':
+    case '3':
+      f_WT = '3';
+      break;
+    default:
+      f_WT = '';
+      break;
+  }
+
+  const params = new URLSearchParams();
+  params.set('keywords', finalKeywords);
+  if (location && location.trim()) {
+    params.set('location', location.trim());
+  }
+  if (timeRangeSeconds && timeRangeSeconds > 0) {
+    params.set('f_TPR', `r${timeRangeSeconds}`);
+  }
+  if (f_E) {
+    params.set('f_E', f_E);
+  }
+  if (f_WT) {
+    params.set('f_WT', f_WT);
+  }
+
+  return `https://www.linkedin.com/jobs/search/?${params.toString()}`;
+}
+
+export async function scrapeLinkedInJobs(optionsOrKeywords: LinkedInSearchOptions | string = {}, location = 'Worldwide', maxPages = 3, timeRangeSeconds = 86400) {
+  const options: LinkedInSearchOptions = typeof optionsOrKeywords === 'string'
+    ? { keywords: optionsOrKeywords, location, maxPages, timeRangeSeconds }
+    : {
+        roles: optionsOrKeywords.roles,
+        location: optionsOrKeywords.location || location,
+        maxPages: optionsOrKeywords.maxPages ?? maxPages,
+        timeRangeSeconds: optionsOrKeywords.timeRangeSeconds ?? timeRangeSeconds,
+        seniority: optionsOrKeywords.seniority || 'all',
+        workplaceType: optionsOrKeywords.workplaceType || 'all',
+        keywords: optionsOrKeywords.keywords,
+      };
+
+  const pagesToScrape = options.maxPages ?? 3;
   console.log('Launching Persistent Chrome Session...');
   const userDataDir = path.join(process.cwd(), 'chrome-data');
   
@@ -36,12 +189,12 @@ export async function scrapeLinkedInJobs(keywords: string = DEFAULT_SEARCH_KEYWO
       }
   }
 
-  // f_TPR=r86400 limits the search to the last 24 hours (86400 seconds)
-  const baseUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(keywords)}&location=${encodeURIComponent(location)}&f_TPR=r${timeRangeSeconds}`; 
+  const baseUrl = buildLinkedInSearchUrl(options);
+  console.log(`Constructed Search URL: ${baseUrl}`);
   
   let currentPage = 1;
 
-  while (currentPage <= maxPages) {
+  while (currentPage <= pagesToScrape) {
       console.log(`\n--- Scraping Page ${currentPage} ---`);
       
       const pageOffset = (currentPage - 1) * 25;
@@ -142,7 +295,24 @@ export async function scrapeLinkedInJobs(keywords: string = DEFAULT_SEARCH_KEYWO
 
 if (process.argv[1]?.includes('linkedin.ts') || process.argv[1]?.includes('linkedin')) {
   const maxPages = parseInt(process.env.SCRAPER_MAX_PAGES || '3', 10);
-  const timeRange = parseInt(process.env.SCRAPER_TIME_RANGE || '86400', 10);
-  console.log(`Starting LinkedIn Scraper: maxPages=${maxPages}, timeRangeSeconds=${timeRange} (Last 24h)`);
-  scrapeLinkedInJobs(DEFAULT_SEARCH_KEYWORDS, 'Worldwide', maxPages, timeRange).catch(console.error);
+  const timeRangeSeconds = parseInt(process.env.SCRAPER_TIME_RANGE ?? '86400', 10);
+  const seniority = process.env.SCRAPER_SENIORITY || 'all';
+  const location = process.env.SCRAPER_LOCATION || 'Worldwide';
+  const workplaceType = process.env.SCRAPER_WORKPLACE || 'all';
+  const keywords = process.env.SCRAPER_KEYWORDS || undefined;
+  const rolesEnv = process.env.SCRAPER_ROLES || '';
+  const roles = rolesEnv ? rolesEnv.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+
+  console.log(
+    `Starting LinkedIn Scraper: roles=${JSON.stringify(roles || ['software_engineer'])}, seniority=${seniority}, location="${location}", workplaceType=${workplaceType}, timeRangeSeconds=${timeRangeSeconds}, maxPages=${maxPages}`
+  );
+  scrapeLinkedInJobs({
+    roles,
+    keywords,
+    seniority,
+    location,
+    timeRangeSeconds,
+    workplaceType,
+    maxPages,
+  }).catch(console.error);
 }

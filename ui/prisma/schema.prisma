@@ -7,18 +7,78 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Job {
-  id                  String   @id @default(uuid())
-  title               String
-  company             String?
-  url                 String   @unique
-  description         String
-  requirements        String?
-  status              String   @default("pending_evaluation") // pending_evaluation, approved, rejected, applied
-  matchScore          Int?
-  matchReason         String?
-  customCoverLetter   String?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+model User {
+  id              String          @id @default(uuid())
+  name            String
+  email           String          @unique
+  passwordHash    String
+  encryptedResume String?         // AES-256-GCM encrypted professional profile / resume text
+  resumeSource    String?         // e.g. "Currículo PDF", "LinkedIn PDF", "Texto Manual"
+  resumeUpdatedAt DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  sessions        Session[]
+  searchHistory   SearchHistory[]
+  appliedJobs     AppliedJob[]
 }
 
+model Session {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model SearchHistory {
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roles            String[]
+  seniority        String
+  location         String
+  workplaceType    String
+  timeRangeSeconds Int
+  booleanQuery     String
+  searchUrl        String
+  createdAt        DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model AppliedJob {
+  id                    String   @id @default(uuid())
+  userId                String
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId                 String?
+  title                 String
+  company               String?
+  url                   String
+  description           String?
+  atsScore              Int?
+  encryptedCustomResume String?  // AES-256-GCM encrypted JSON { text, html, atsScore, matchedKeywords }
+  encryptedCoverLetter  String?  // AES-256-GCM encrypted JSON { text, html }
+  appliedAt             DateTime @default(now())
+
+  @@unique([userId, url])
+  @@index([userId, appliedAt(sort: Desc)])
+}
+
+model Job {
+  id                String   @id @default(uuid())
+  title             String
+  company           String?
+  url               String   @unique
+  description       String
+  requirements      String?
+  status            String   @default("pending_evaluation") // pending_evaluation, approved, applied
+  matchScore        Int?
+  matchReason       String?
+  customCoverLetter String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
