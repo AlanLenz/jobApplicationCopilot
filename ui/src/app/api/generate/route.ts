@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 import { prisma } from '@/lib/prisma';
+import { getCurrentUser } from '@/lib/auth';
+import { decryptUserData, encryptUserData } from '@/lib/security';
 import {
   saveGeneratedDocument,
   getGeneratedDocument,
@@ -21,7 +23,10 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'jobId and type (resume | cover_letter) are required' }, { status: 400 });
     }
 
-    const doc = getGeneratedDocument(jobId, type);
+    const user = await getCurrentUser();
+    const cacheKey = user ? `${user.id}_${jobId}` : jobId;
+
+    const doc = getGeneratedDocument(cacheKey, type) || getGeneratedDocument(jobId, type);
     if (!doc) {
       return NextResponse.json({ found: false }, { status: 404 });
     }
@@ -42,9 +47,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Valid jobId and type (resume | cover_letter) required' }, { status: 400 });
     }
 
-    // Check disk cache first unless explicitly regenerating
+    const user = await getCurrentUser();
+    const cacheKey = user ? `${user.id}_${jobId}` : jobId;
+
+    // Check cache first unless explicitly regenerating
     if (!regenerate) {
-      const existing = getGeneratedDocument(jobId, type);
+      const existing = getGeneratedDocument(cacheKey, type);
       if (existing) {
         return NextResponse.json({
           success: true,
@@ -56,30 +64,82 @@ export async function POST(request: Request) {
       }
     }
 
-    // Fetch Job details
-    const job = await prisma.job.findUnique({
+    // Fetch Job details (either from Job inbox or user's AppliedJob history)
+    let job: {
+      id: string;
+      title: string;
+      company: string | null;
+      url: string;
+      description: string;
+      requirements?: string | null;
+    } | null = await prisma.job.findUnique({
       where: { id: jobId },
     });
 
-    if (!job) {
-      return NextResponse.json({ error: `Job with ID ${jobId} not found` }, { status: 404 });
+    if (!job && user) {
+      const applied = await prisma.appliedJob.findFirst({
+        where: {
+          userId: user.id,
+          OR: [{ id: jobId }, { jobId }],
+        },
+      });
+      if (applied) {
+        job = {
+          id: applied.jobId || applied.id,
+          title: applied.title,
+          company: applied.company,
+          url: applied.url,
+          description: applied.description || '',
+          requirements: null,
+        };
+      }
     }
 
-    const masterResume = getMasterResume();
+    if (!job) {
+      return NextResponse.json({ error: `Vaga não encontrada (${jobId})` }, { status: 404 });
+    }
+
+    // Resolve the user's decrypted professional profile first; fallback to local resume.txt only if not uploaded
+    let masterResume = '';
+    let profileSource = 'Currículo Padrão Local';
+
+    if (user && user.encryptedResume) {
+      const decrypted = decryptUserData(user.encryptedResume, user.id);
+      if (decrypted && decrypted.trim().length > 20) {
+        masterResume = decrypted;
+        profileSource = user.resumeSource || 'Perfil Criptografado do Usuário';
+      }
+    }
+
+    if (!masterResume) {
+      masterResume = getMasterResume();
+    }
 
     if (type === 'resume') {
       const resumeResult = await generateTailoredResume(job, masterResume);
-      
-      saveGeneratedDocument(jobId, 'resume', resumeResult.plainText, resumeResult.html);
 
-      // Attempt DB update if field exists
-      try {
-        await (prisma.job as any).update({
-          where: { id: jobId },
-          data: { customResume: resumeResult.plainText },
-        });
-      } catch (dbErr) {
-        // Ignored if column isn't migrated in DB yet
+      saveGeneratedDocument(cacheKey, 'resume', resumeResult.plainText, resumeResult.html);
+
+      // Update encrypted document on AppliedJob if user already applied
+      if (user) {
+        const encryptedDoc = encryptUserData(
+          JSON.stringify({
+            text: resumeResult.plainText,
+            html: resumeResult.html,
+            atsScore: resumeResult.atsScore,
+            matchedKeywords: resumeResult.matchedKeywords,
+          }),
+          user.id
+        );
+        await prisma.appliedJob
+          .updateMany({
+            where: { userId: user.id, OR: [{ jobId }, { url: job.url }] },
+            data: {
+              encryptedCustomResume: encryptedDoc,
+              atsScore: resumeResult.atsScore,
+            },
+          })
+          .catch(() => {});
       }
 
       return NextResponse.json({
@@ -87,6 +147,7 @@ export async function POST(request: Request) {
         cached: false,
         jobId,
         type: 'resume',
+        profileSource,
         text: resumeResult.plainText,
         html: resumeResult.html,
         atsScore: resumeResult.atsScore,
@@ -97,16 +158,22 @@ export async function POST(request: Request) {
     if (type === 'cover_letter') {
       const coverLetterResult = await generateCoverLetter(job, masterResume);
 
-      saveGeneratedDocument(jobId, 'cover_letter', coverLetterResult.plainText, coverLetterResult.html);
+      saveGeneratedDocument(cacheKey, 'cover_letter', coverLetterResult.plainText, coverLetterResult.html);
 
-      // Update in DB
-      try {
-        await prisma.job.update({
-          where: { id: jobId },
-          data: { customCoverLetter: coverLetterResult.plainText },
-        });
-      } catch (dbErr) {
-        console.warn('DB update for customCoverLetter skipped:', dbErr);
+      if (user) {
+        const encryptedDoc = encryptUserData(
+          JSON.stringify({
+            text: coverLetterResult.plainText,
+            html: coverLetterResult.html,
+          }),
+          user.id
+        );
+        await prisma.appliedJob
+          .updateMany({
+            where: { userId: user.id, OR: [{ jobId }, { url: job.url }] },
+            data: { encryptedCoverLetter: encryptedDoc },
+          })
+          .catch(() => {});
       }
 
       return NextResponse.json({
@@ -114,6 +181,7 @@ export async function POST(request: Request) {
         cached: false,
         jobId,
         type: 'cover_letter',
+        profileSource,
         text: coverLetterResult.plainText,
         html: coverLetterResult.html,
       });
@@ -142,10 +210,10 @@ ${job.requirements ? `Requirements: ${job.requirements}` : ''}
 
 Strict Rules:
 1. Do NOT fabricate experience, dates, or degrees. Maintain all verified roles, achievements, and degrees as provided in the master resume.
-2. Optimize the Professional Summary to directly speak to the target role's core mission and tech stack.
-3. Align Technical Skills with the exact terminology in the job description (e.g. if Vue.js, Spring Boot, TypeScript, Docker are required, emphasize them explicitly).
-4. Frame the bullet points of past experience to highlight relevant achievements, quantified metrics, and tools mentioned in the job description.
-5. Standardize all headers into English (PROFESSIONAL SUMMARY, TECHNICAL SKILLS, PROFESSIONAL EXPERIENCE, EDUCATION, CERTIFICATIONS, LANGUAGES).
+2. Detect the language of the Job Description (Portuguese or English) and write the tailored resume in the SAME language as the job posting (unless the job explicitly asks for English).
+3. Optimize the Professional Summary to directly speak to the target role's core mission and tech stack.
+4. Align Technical Skills with the exact terminology in the job description (e.g. if Vue.js, Spring Boot, TypeScript, Docker are required, emphasize them explicitly).
+5. Frame the bullet points of past experience to highlight relevant achievements, quantified metrics, and tools mentioned in the job description.
 6. Provide a single-column plain text format AND an elegant, clean HTML template formatted for A4 print.
 
 Return a valid JSON object matching this schema:
@@ -199,12 +267,13 @@ Description:
 ${job.description}
 
 Cover Letter Structure Guidelines:
-1. Length: 250-380 words (3-4 focused paragraphs).
-2. Opening Hook: 2-3 sentences. Start with company knowledge or their specific technical challenge/value stream. Avoid generic openers like "I am writing to apply...".
-3. Body Paragraph 1 (Core Match): Connect the candidate's strongest relevant experience, project metrics, and technical expertise from the master resume.
-4. Body Paragraph 2 (Value Add & Mindset): Highlight problem-solving ownership, stakeholder collaboration, and modern development workflows.
-5. Closing Paragraph: Enthusiastic call to action, referencing relevant communication strengths and eagerness to contribute.
-6. Provide clean plain text (with date and addresses) AND clean, printable HTML.
+1. Detect the language of the Job Description (Portuguese or English) and write the cover letter in the SAME language as the job posting.
+2. Length: 250-380 words (3-4 focused paragraphs).
+3. Opening Hook: 2-3 sentences. Start with company knowledge or their specific technical challenge/value stream. Avoid generic openers.
+4. Body Paragraph 1 (Core Match): Connect the candidate's strongest relevant experience, project metrics, and technical expertise from the master resume.
+5. Body Paragraph 2 (Value Add & Mindset): Highlight problem-solving ownership, stakeholder collaboration, and modern development workflows.
+6. Closing Paragraph: Enthusiastic call to action, referencing relevant communication strengths and eagerness to contribute.
+7. Provide clean plain text (with date and contact info) AND clean, printable HTML.
 
 Return a valid JSON object matching this schema:
 {

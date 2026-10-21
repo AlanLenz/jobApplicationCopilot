@@ -6,9 +6,14 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const status = searchParams.get('status');
 
+    // Clean up any legacy rejected jobs since rejected jobs should not be registered
+    await prisma.job.deleteMany({
+      where: { status: 'rejected' },
+    }).catch(() => {});
+
     const jobs = await prisma.job.findMany({
       where: status ? { status } : undefined,
-      orderBy: { createdAt: 'desc' }, // Order by newest since we aren't using matchScore anymore
+      orderBy: { createdAt: 'desc' },
     });
 
     return NextResponse.json(jobs);
@@ -23,9 +28,21 @@ export async function PUT(request: Request) {
     const body = await request.json();
     const { id, status } = body;
 
+    if (!id) {
+      return NextResponse.json({ error: 'Job ID is required' }, { status: 400 });
+    }
+
+    // Rejected jobs do not need to be registered — delete them immediately
+    if (status === 'rejected') {
+      await prisma.job.delete({
+        where: { id },
+      }).catch(() => {});
+      return NextResponse.json({ id, deleted: true });
+    }
+
     const updatedJob = await prisma.job.update({
       where: { id },
-      data: { status }
+      data: { status },
     });
 
     return NextResponse.json(updatedJob);
@@ -35,3 +52,22 @@ export async function PUT(request: Request) {
   }
 }
 
+export async function DELETE(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const id = searchParams.get('id');
+
+    if (!id) {
+      return NextResponse.json({ error: 'Job ID is required' }, { status: 400 });
+    }
+
+    await prisma.job.delete({
+      where: { id },
+    }).catch(() => {});
+
+    return NextResponse.json({ id, deleted: true });
+  } catch (error) {
+    console.error('Failed to delete job:', error);
+    return NextResponse.json({ error: 'Failed to delete job' }, { status: 500 });
+  }
+}

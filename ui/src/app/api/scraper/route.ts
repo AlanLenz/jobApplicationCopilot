@@ -2,6 +2,12 @@ import { NextResponse } from 'next/server';
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { prisma } from '@/lib/prisma';
+import { getCurrentUser } from '@/lib/auth';
+import {
+  buildBooleanQueryFromFilters,
+  buildPreviewLinkedInUrl,
+} from '@/components/SearchFilters';
 
 interface ScraperState {
   status: 'idle' | 'running' | 'completed' | 'error';
@@ -27,7 +33,6 @@ if (!global.__scraperState) {
 }
 
 function getRootDir(): string {
-  // If running inside ui/
   if (fs.existsSync(path.resolve(process.cwd(), '..', 'src', 'scraper', 'linkedin.ts'))) {
     return path.resolve(process.cwd(), '..');
   }
@@ -40,22 +45,69 @@ export async function GET() {
 
 export async function POST(request: Request) {
   if (global.__scraperState?.status === 'running') {
-    return NextResponse.json({
-      success: false,
-      message: 'Scraper is already running',
-      state: global.__scraperState,
-    }, { status: 409 });
+    return NextResponse.json(
+      {
+        success: false,
+        message: 'Scraper is already running',
+        state: global.__scraperState,
+      },
+      { status: 409 }
+    );
   }
 
+  let roles: string[] = ['software_engineer'];
   let maxPages = 3;
-  let timeRangeSeconds = 86400; // 24 hours
+  let timeRangeSeconds = 86400; // 24 hours by default
+  let seniority = 'all';
+  let location = 'Worldwide';
+  let workplaceType = 'all';
+  let keywords = '';
 
   try {
     const body = await request.json().catch(() => ({}));
-    if (body.maxPages) maxPages = Number(body.maxPages);
-    if (body.timeRangeSeconds) timeRangeSeconds = Number(body.timeRangeSeconds);
+    if (Array.isArray(body.roles) && body.roles.length > 0) {
+      roles = body.roles.map(String);
+    }
+    if (body.maxPages !== undefined) maxPages = Number(body.maxPages);
+    if (body.timeRangeSeconds !== undefined) timeRangeSeconds = Number(body.timeRangeSeconds);
+    if (body.seniority) seniority = String(body.seniority);
+    if (body.location) location = String(body.location);
+    if (body.workplaceType) workplaceType = String(body.workplaceType);
+    if (body.keywords) keywords = String(body.keywords);
   } catch (e) {
     // defaults
+  }
+
+  const filterSnapshot = {
+    roles,
+    seniority,
+    timeRangeSeconds,
+    location,
+    workplaceType,
+  };
+  const { finalKeywords } = buildBooleanQueryFromFilters(filterSnapshot);
+  const searchUrl = buildPreviewLinkedInUrl(filterSnapshot);
+
+  // Record search in user's SearchHistory if logged in
+  let recordedSearch = null;
+  try {
+    const user = await getCurrentUser();
+    if (user) {
+      recordedSearch = await prisma.searchHistory.create({
+        data: {
+          userId: user.id,
+          roles,
+          seniority,
+          location,
+          workplaceType,
+          timeRangeSeconds,
+          booleanQuery: keywords || finalKeywords,
+          searchUrl,
+        },
+      });
+    }
+  } catch (err) {
+    console.warn('Could not save search history:', err);
   }
 
   const rootDir = getRootDir();
@@ -64,17 +116,24 @@ export async function POST(request: Request) {
     status: 'running',
     startedAt: new Date().toISOString(),
     endedAt: null,
-    logs: [`[${new Date().toLocaleTimeString()}] Starting scraper for jobs from the last 24 hours (maxPages=${maxPages})...`],
-    message: 'Scraping LinkedIn jobs from the last 24 hours...',
+    logs: [
+      `[${new Date().toLocaleTimeString()}] Starting scraper (roles=${roles.join(',')}, seniority=${seniority}, location="${location}", workplace=${workplaceType}, timeRange=${timeRangeSeconds}s, maxPages=${maxPages})...`,
+      `[${new Date().toLocaleTimeString()}] Boolean Query: ${keywords || finalKeywords}`,
+    ],
+    message: 'Scraping LinkedIn jobs with custom boolean filters...',
   };
 
   const env = {
     ...process.env,
+    SCRAPER_ROLES: roles.join(','),
     SCRAPER_MAX_PAGES: String(maxPages),
     SCRAPER_TIME_RANGE: String(timeRangeSeconds),
+    SCRAPER_SENIORITY: seniority,
+    SCRAPER_LOCATION: location,
+    SCRAPER_WORKPLACE: workplaceType,
+    ...(keywords ? { SCRAPER_KEYWORDS: keywords } : {}),
   };
 
-  // Launch scraper child process
   const child = spawn('npx tsx src/scraper/linkedin.ts', {
     cwd: rootDir,
     env,
@@ -111,11 +170,15 @@ export async function POST(request: Request) {
       if (code === 0) {
         global.__scraperState.status = 'completed';
         global.__scraperState.message = 'Scraping completed successfully!';
-        global.__scraperState.logs.push(`[${new Date().toLocaleTimeString()}] Scraping completed successfully (exit code 0).`);
+        global.__scraperState.logs.push(
+          `[${new Date().toLocaleTimeString()}] Scraping completed successfully (exit code 0).`
+        );
       } else {
         global.__scraperState.status = 'error';
         global.__scraperState.message = `Scraper stopped with exit code ${code}. Check logs for details.`;
-        global.__scraperState.logs.push(`[${new Date().toLocaleTimeString()}] Scraper process exited with code ${code}.`);
+        global.__scraperState.logs.push(
+          `[${new Date().toLocaleTimeString()}] Scraper process exited with code ${code}.`
+        );
       }
     }
   });
@@ -134,6 +197,7 @@ export async function POST(request: Request) {
     success: true,
     message: 'Scraper started',
     state: global.__scraperState,
+    recordedSearch,
   });
 }
 
