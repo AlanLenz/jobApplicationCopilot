@@ -4,10 +4,14 @@ import path from 'path';
 import fs from 'fs';
 import { prisma } from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
+import { getUserSettings, normalizeCustomRoles } from '@/lib/settings';
 import {
+  DEFAULT_MAX_PAGES,
+  DEFAULT_SEARCH_FILTERS,
+  MAX_PAGES_LIMIT,
   buildBooleanQueryFromFilters,
   buildPreviewLinkedInUrl,
-} from '@/components/SearchFilters';
+} from '@/lib/search';
 
 interface ScraperState {
   status: 'idle' | 'running' | 'completed' | 'error';
@@ -55,12 +59,12 @@ export async function POST(request: Request) {
     );
   }
 
-  let roles: string[] = ['software_engineer'];
-  let maxPages = 3;
-  let timeRangeSeconds = 86400; // 24 hours by default
-  let seniority = 'all';
-  let location = 'Worldwide';
-  let workplaceType = 'all';
+  let roles: string[] = DEFAULT_SEARCH_FILTERS.roles;
+  let maxPages = DEFAULT_MAX_PAGES;
+  let timeRangeSeconds = DEFAULT_SEARCH_FILTERS.timeRangeSeconds;
+  let seniority = DEFAULT_SEARCH_FILTERS.seniority;
+  let location = DEFAULT_SEARCH_FILTERS.location;
+  let workplaceType = DEFAULT_SEARCH_FILTERS.workplaceType;
   let keywords = '';
 
   try {
@@ -68,7 +72,9 @@ export async function POST(request: Request) {
     if (Array.isArray(body.roles) && body.roles.length > 0) {
       roles = body.roles.map(String);
     }
-    if (body.maxPages !== undefined) maxPages = Number(body.maxPages);
+    if (body.maxPages !== undefined) {
+      maxPages = Math.min(MAX_PAGES_LIMIT, Math.max(1, Math.round(Number(body.maxPages)) || DEFAULT_MAX_PAGES));
+    }
     if (body.timeRangeSeconds !== undefined) timeRangeSeconds = Number(body.timeRangeSeconds);
     if (body.seniority) seniority = String(body.seniority);
     if (body.location) location = String(body.location);
@@ -78,6 +84,10 @@ export async function POST(request: Request) {
     // defaults
   }
 
+  const user = await getCurrentUser().catch(() => null);
+  // The user's own role presets from "Configurações" expand into their boolean terms.
+  const customRoles = user ? normalizeCustomRoles((await getUserSettings(user.id))?.customRoles) : [];
+
   const filterSnapshot = {
     roles,
     seniority,
@@ -85,13 +95,12 @@ export async function POST(request: Request) {
     location,
     workplaceType,
   };
-  const { finalKeywords } = buildBooleanQueryFromFilters(filterSnapshot);
-  const searchUrl = buildPreviewLinkedInUrl(filterSnapshot);
+  const { finalKeywords } = buildBooleanQueryFromFilters(filterSnapshot, customRoles);
+  const searchUrl = buildPreviewLinkedInUrl(filterSnapshot, customRoles);
 
   // Record search in user's SearchHistory if logged in
   let recordedSearch = null;
   try {
-    const user = await getCurrentUser();
     if (user) {
       recordedSearch = await prisma.searchHistory.create({
         data: {
@@ -131,7 +140,9 @@ export async function POST(request: Request) {
     SCRAPER_SENIORITY: seniority,
     SCRAPER_LOCATION: location,
     SCRAPER_WORKPLACE: workplaceType,
-    ...(keywords ? { SCRAPER_KEYWORDS: keywords } : {}),
+    // Always send the final boolean query, so the scraper runs exactly what the dashboard
+    // previewed (including custom role presets the CLI scraper does not know about).
+    SCRAPER_KEYWORDS: keywords || finalKeywords,
   };
 
   const child = spawn('npx tsx src/scraper/linkedin.ts', {

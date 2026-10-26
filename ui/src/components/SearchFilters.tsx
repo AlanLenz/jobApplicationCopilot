@@ -17,223 +17,45 @@ import {
   Check,
   Code2,
 } from 'lucide-react';
+import {
+  DEFAULT_LOCATION_SUGGESTIONS,
+  DEFAULT_SEARCH_FILTERS,
+  RoleOption,
+  SENIORITY_OPTIONS,
+  SearchFilterState,
+  TIME_RANGE_OPTIONS,
+  WORKPLACE_OPTIONS,
+  buildBooleanQueryFromFilters,
+  buildPreviewLinkedInUrl,
+  getRoleOptions,
+} from '@/lib/search';
 
-export interface SearchFilterState {
-  roles: string[];
-  seniority: string;
-  timeRangeSeconds: number;
-  location: string;
-  workplaceType: string;
-}
+export type { SearchFilterState } from '@/lib/search';
 
 interface SearchFiltersProps {
   filters: SearchFilterState;
   onChange: (newFilters: SearchFilterState) => void;
   disabled?: boolean;
+  /** Role presets created by the user in "Configurações". */
+  customRoles?: RoleOption[];
+  locationSuggestions?: string[];
 }
 
-export const ROLE_OPTIONS = [
-  {
-    value: 'software_engineer',
-    label: 'Software Engineer / Dev Geral',
-    booleanTerms: '"Desenvolvedor" OR "Developer" OR "Software Engineer" OR "Engenheiro de Software"',
-  },
-  {
-    value: 'fullstack',
-    label: 'Full Stack',
-    booleanTerms: '"Full Stack" OR "Fullstack" OR "Desenvolvedor Full Stack" OR "Full Stack Developer" OR "Full Stack Engineer"',
-  },
-  {
-    value: 'frontend',
-    label: 'Front-end',
-    booleanTerms: '"Frontend" OR "Front-end" OR "Desenvolvedor Front-end" OR "Frontend Developer" OR "Frontend Engineer" OR "React Developer"',
-  },
-  {
-    value: 'backend',
-    label: 'Back-end',
-    booleanTerms: '"Backend" OR "Back-end" OR "Desenvolvedor Back-end" OR "Backend Developer" OR "Backend Engineer"',
-  },
-  {
-    value: 'mobile',
-    label: 'Mobile (RN / Flutter / iOS / Android)',
-    booleanTerms: '"Mobile Developer" OR "Desenvolvedor Mobile" OR "React Native" OR "Flutter" OR "iOS Developer" OR "Android Developer"',
-  },
-  {
-    value: 'devops',
-    label: 'DevOps / Cloud / SRE',
-    booleanTerms: '"DevOps" OR "SRE" OR "Site Reliability Engineer" OR "Cloud Engineer" OR "Platform Engineer"',
-  },
-  {
-    value: 'data',
-    label: 'Dados (Data Eng / Science / Analytics)',
-    booleanTerms: '"Data Engineer" OR "Engenheiro de Dados" OR "Data Scientist" OR "Cientista de Dados" OR "Data Analyst"',
-  },
-  {
-    value: 'ai_ml',
-    label: 'IA / Machine Learning',
-    booleanTerms: '"AI Engineer" OR "Machine Learning Engineer" OR "Engenheiro de IA" OR "LLM" OR "GenAI"',
-  },
-  {
-    value: 'qa',
-    label: 'QA / Automação de Testes',
-    booleanTerms: '"QA" OR "Quality Assurance" OR "Analista de Testes" OR "Test Automation" OR "SDET"',
-  },
-  {
-    value: 'tech_lead',
-    label: 'Tech Lead / Arquitetura',
-    booleanTerms: '"Tech Lead" OR "Software Architect" OR "Arquiteto de Software" OR "Staff Engineer" OR "Engineering Manager"',
-  },
-] as const;
-
-export const ROLE_BOOLEAN_MAP: Record<string, string> = Object.fromEntries(
-  ROLE_OPTIONS.map((r) => [r.value, r.booleanTerms])
-);
-
-export const ROLE_LABEL_MAP: Record<string, string> = Object.fromEntries(
-  ROLE_OPTIONS.map((r) => [r.value, r.label])
-);
-
-export const SENIORITY_OPTIONS = [
-  { value: 'all', label: 'Todos (Qualquer Senioridade)' },
-  { value: 'internship', label: 'Estágio / Trainee' },
-  { value: 'junior', label: 'Júnior (Entry-level)' },
-  { value: 'pleno', label: 'Pleno (Mid-level)' },
-  { value: 'jr-pleno', label: 'Júnior & Pleno' },
-  { value: 'senior', label: 'Sênior / Lead / Staff' },
-] as const;
-
-export const TIME_RANGE_OPTIONS = [
-  { value: 3600, label: 'Última 1 hora' },
-  { value: 43200, label: 'Últimas 12 horas' },
-  { value: 86400, label: 'Últimas 24 horas (Padrão)' },
-  { value: 259200, label: 'Últimos 3 dias' },
-  { value: 604800, label: 'Última semana (7 dias)' },
-  { value: 2592000, label: 'Último mês (30 dias)' },
-  { value: 0, label: 'Qualquer data' },
-] as const;
-
-export const WORKPLACE_OPTIONS = [
-  { value: 'all', label: 'Todos os modelos' },
-  { value: 'remote', label: 'Remoto' },
-  { value: 'hybrid', label: 'Híbrido' },
-  { value: 'onsite', label: 'Presencial' },
-] as const;
-
-export const LOCATION_SUGGESTIONS = [
-  'Worldwide',
-  'Brazil',
-  'São Paulo, Brazil',
-  'Cascavel, Paraná, Brazil',
-  'United States',
-  'European Union',
-  'Portugal',
-];
-
-export function buildRolesBooleanClause(roles: string[]): string {
-  const activeRoles = roles && roles.length > 0 ? roles : ['software_engineer'];
-  const parts = activeRoles
-    .map((r) => r.trim())
-    .filter(Boolean)
-    .map((roleKey) => {
-      if (ROLE_BOOLEAN_MAP[roleKey]) {
-        return ROLE_BOOLEAN_MAP[roleKey];
-      }
-      const cleanCustom = roleKey.replace(/"/g, '').trim();
-      return `"${cleanCustom}"`;
-    });
-
-  if (parts.length === 0) {
-    return `(${ROLE_BOOLEAN_MAP.software_engineer})`;
-  }
-
-  return `(${parts.join(' OR ')})`;
-}
-
-export function buildBooleanQueryFromFilters(filters: SearchFilterState): {
-  finalKeywords: string;
-  f_E: string;
-} {
-  const { roles, seniority } = filters;
-  const roleClause = buildRolesBooleanClause(roles);
-  let finalKeywords = roleClause;
-  let f_E = '';
-
-  switch (seniority) {
-    case 'internship':
-      finalKeywords = `${roleClause} AND ("Estágio" OR "Estagiário" OR "Intern" OR "Internship" OR "Trainee")`;
-      f_E = '1';
-      break;
-    case 'junior':
-      finalKeywords = `${roleClause} AND ("Junior" OR "Júnior" OR "Jr" OR "Entry Level" OR "Entry-level") NOT ("Senior" OR "Sr" OR "Pleno" OR "Lead" OR "Staff")`;
-      f_E = '2';
-      break;
-    case 'pleno':
-      finalKeywords = `${roleClause} AND ("Pleno" OR "Mid level" OR "Mid-level" OR "Middle") NOT ("Senior" OR "Sr" OR "Lead" OR "Principal" OR "Staff")`;
-      f_E = '3,4';
-      break;
-    case 'jr-pleno':
-      finalKeywords = `${roleClause} AND ("Junior" OR "Jr" OR "Pleno" OR "Mid level" OR "Mid-level") NOT ("Senior" OR "Sr" OR "Lead" OR "Principal" OR "Staff")`;
-      f_E = '2,3,4';
-      break;
-    case 'senior':
-      finalKeywords = `${roleClause} AND ("Senior" OR "Sênior" OR "Sr" OR "Lead" OR "Staff" OR "Principal" OR "Especialista")`;
-      f_E = '4,5';
-      break;
-    case 'all':
-    default:
-      finalKeywords = roleClause;
-      f_E = '';
-      break;
-  }
-
-  return { finalKeywords, f_E };
-}
-
-export function buildPreviewLinkedInUrl(filters: SearchFilterState): string {
-  const { location, timeRangeSeconds, workplaceType } = filters;
-  const { finalKeywords, f_E } = buildBooleanQueryFromFilters(filters);
-
-  let f_WT = '';
-  switch (workplaceType) {
-    case 'onsite':
-      f_WT = '1';
-      break;
-    case 'remote':
-      f_WT = '2';
-      break;
-    case 'hybrid':
-      f_WT = '3';
-      break;
-    default:
-      f_WT = '';
-      break;
-  }
-
-  const params = new URLSearchParams();
-  params.set('keywords', finalKeywords);
-  if (location.trim()) {
-    params.set('location', location.trim());
-  }
-  if (timeRangeSeconds > 0) {
-    params.set('f_TPR', `r${timeRangeSeconds}`);
-  }
-  if (f_E) {
-    params.set('f_E', f_E);
-  }
-  if (f_WT) {
-    params.set('f_WT', f_WT);
-  }
-
-  return `https://www.linkedin.com/jobs/search/?${params.toString()}`;
-}
-
-export const SearchFilters: FC<SearchFiltersProps> = ({ filters, onChange, disabled = false }) => {
+export const SearchFilters: FC<SearchFiltersProps> = ({
+  filters,
+  onChange,
+  disabled = false,
+  customRoles = [],
+  locationSuggestions = DEFAULT_LOCATION_SUGGESTIONS,
+}) => {
   const [customRoleInput, setCustomRoleInput] = useState('');
 
-  const { finalKeywords } = useMemo(() => buildBooleanQueryFromFilters(filters), [filters]);
-  const previewUrl = useMemo(() => buildPreviewLinkedInUrl(filters), [filters]);
+  const roleOptions = useMemo(() => getRoleOptions(customRoles), [customRoles]);
+  const { finalKeywords } = useMemo(() => buildBooleanQueryFromFilters(filters, customRoles), [filters, customRoles]);
+  const previewUrl = useMemo(() => buildPreviewLinkedInUrl(filters, customRoles), [filters, customRoles]);
 
-  const selectedRoles = filters.roles?.length > 0 ? filters.roles : ['software_engineer'];
+  const fallbackRoles = DEFAULT_SEARCH_FILTERS.roles;
+  const selectedRoles = filters.roles?.length > 0 ? filters.roles : fallbackRoles;
 
   const toggleRole = (roleValue: string) => {
     if (disabled) return;
@@ -242,7 +64,7 @@ export const SearchFilters: FC<SearchFiltersProps> = ({ filters, onChange, disab
     if (exists) {
       nextRoles = selectedRoles.filter((r) => r !== roleValue);
       if (nextRoles.length === 0) {
-        nextRoles = ['software_engineer']; // Keep at least 1 role active
+        nextRoles = fallbackRoles; // Keep at least 1 role active
       }
     } else {
       nextRoles = [...selectedRoles, roleValue];
@@ -270,7 +92,7 @@ export const SearchFilters: FC<SearchFiltersProps> = ({ filters, onChange, disab
     const nextRoles = selectedRoles.filter((r) => r !== roleValue);
     onChange({
       ...filters,
-      roles: nextRoles.length > 0 ? nextRoles : ['software_engineer'],
+      roles: nextRoles.length > 0 ? nextRoles : fallbackRoles,
     });
   };
 
@@ -290,8 +112,9 @@ export const SearchFilters: FC<SearchFiltersProps> = ({ filters, onChange, disab
     onChange({ ...filters, workplaceType: e.target.value });
   };
 
-  // Custom roles that aren't in the preset ROLE_OPTIONS list
-  const customRoles = selectedRoles.filter((r) => !ROLE_BOOLEAN_MAP[r]);
+  // Free-text terms typed in the search bar (not a built-in or saved preset)
+  const knownRoleValues = new Set(roleOptions.map((r) => r.value));
+  const adHocRoles = selectedRoles.filter((r) => !knownRoleValues.has(r));
 
   return (
     <Card className="border bg-card/60 shadow-sm">
@@ -321,7 +144,7 @@ export const SearchFilters: FC<SearchFiltersProps> = ({ filters, onChange, disab
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {ROLE_OPTIONS.map((role) => {
+            {roleOptions.map((role) => {
               const isSelected = selectedRoles.includes(role.value);
               return (
                 <button
@@ -343,7 +166,7 @@ export const SearchFilters: FC<SearchFiltersProps> = ({ filters, onChange, disab
             })}
 
             {/* Custom added role tags */}
-            {customRoles.map((customRole) => (
+            {adHocRoles.map((customRole) => (
               <span
                 key={customRole}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-primary text-primary-foreground border border-primary shadow-sm"
@@ -448,7 +271,7 @@ export const SearchFilters: FC<SearchFiltersProps> = ({ filters, onChange, disab
               className="h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
             />
             <datalist id="location-suggestions">
-              {LOCATION_SUGGESTIONS.map((loc) => (
+              {locationSuggestions.map((loc) => (
                 <option key={loc} value={loc} />
               ))}
             </datalist>

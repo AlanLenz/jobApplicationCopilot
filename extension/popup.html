@@ -1,16 +1,54 @@
 <!DOCTYPE html>
-<html>
+<html lang="pt-BR">
 <head>
+  <meta charset="utf-8" />
   <style>
-    body { width: 300px; padding: 10px; font-family: sans-serif; }
-    button { padding: 10px; width: 100%; cursor: pointer; background: #0070f3; color: white; border: none; border-radius: 5px; }
+    body { width: 320px; padding: 12px; font-family: system-ui, sans-serif; font-size: 13px; color: #111; }
+    h3 { margin: 0 0 8px; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+    .tabs button { flex: 1; padding: 6px; border: 1px solid #ccc; background: #f5f5f5; border-radius: 5px; cursor: pointer; }
+    .tabs button.active { background: #0070f3; color: #fff; border-color: #0070f3; }
+    label { display: block; font-size: 11px; font-weight: 600; margin: 6px 0 2px; color: #444; }
+    input { width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; }
+    .row { display: flex; gap: 6px; }
+    .row > div { flex: 1; }
+    .primary { margin-top: 10px; padding: 10px; width: 100%; cursor: pointer; background: #0070f3; color: white; border: none; border-radius: 5px; font-weight: 600; }
+    .secondary { margin-top: 8px; padding: 8px; width: 100%; cursor: pointer; background: #fff; border: 1px solid #ccc; border-radius: 5px; }
+    #status { margin-top: 8px; font-size: 12px; min-height: 16px; }
+    .hint { font-size: 11px; color: #666; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <h3>Job Copilot</h3>
-  <p>Status: Ready</p>
-  <button id="fillForm">Auto-Fill Application</button>
+  <div class="tabs">
+    <button id="tab-fill" class="active">Preencher</button>
+    <button id="tab-profile">Meus dados</button>
+  </div>
+
+  <section id="panel-fill">
+    <p class="hint">Preenche os campos do formulário de candidatura aberto na aba atual com os dados salvos em "Meus dados".</p>
+    <button id="fillForm" class="primary">Auto-preencher candidatura</button>
+  </section>
+
+  <section id="panel-profile" hidden>
+    <div class="row">
+      <div><label for="firstName">Nome</label><input id="firstName" autocomplete="given-name" /></div>
+      <div><label for="lastName">Sobrenome</label><input id="lastName" autocomplete="family-name" /></div>
+    </div>
+    <label for="email">E-mail</label><input id="email" type="email" autocomplete="email" />
+    <label for="phone">Telefone</label><input id="phone" type="tel" autocomplete="tel" />
+    <label for="city">Cidade</label><input id="city" autocomplete="address-level2" />
+    <label for="linkedin">LinkedIn</label><input id="linkedin" type="url" placeholder="https://linkedin.com/in/..." />
+    <label for="github">GitHub</label><input id="github" type="url" placeholder="https://github.com/..." />
+    <label for="portfolio">Portfólio / Site</label><input id="portfolio" type="url" />
+    <label for="dashboardUrl">URL do painel Job Copilot</label>
+    <input id="dashboardUrl" type="url" placeholder="http://localhost:3000" />
+    <p class="hint">Apenas esta origem pode enviar a vaga ativa para a extensão.</p>
+    <button id="saveProfile" class="secondary">Salvar dados</button>
+  </section>
+
+  <div id="status"></div>
   <script src="popup.js"></script>
 </body>
 </html>
-

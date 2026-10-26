@@ -21,6 +21,49 @@ model User {
   sessions        Session[]
   searchHistory   SearchHistory[]
   appliedJobs     AppliedJob[]
+  settings        UserSettings?
+  documents       GeneratedDocument[]
+}
+
+// Per-user preferences editable from the "Configurações" tab in the dashboard.
+// Anything left null falls back to the server environment (.env) or built-in defaults.
+model UserSettings {
+  id                  String   @id @default(uuid())
+  userId              String   @unique
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // AI provider (any LLM): "gemini", "anthropic", "openai", "openrouter", "ollama", "custom"...
+  aiProvider          String?
+  aiModel             String?
+  aiBaseUrl           String?
+  encryptedAiApiKey   String?  // AES-256-GCM encrypted, never returned to the browser
+
+  // Search defaults & customization
+  searchDefaults      Json?    // { roles, seniority, timeRangeSeconds, location, workplaceType, maxPages }
+  customRoles         Json?    // [{ value, label, booleanTerms }]
+  locationSuggestions String[] @default([])
+
+  // AI job evaluation (replaces the hardcoded location rules of the old CLI evaluator)
+  evaluationCriteria  String?
+  evaluationMinScore  Int      @default(70)
+  autoDiscardBelowMin Boolean  @default(false)
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+// Tailored resumes / cover letters, encrypted per user (replaces plaintext files in generated/)
+model GeneratedDocument {
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId            String
+  type             String   // "resume" | "cover_letter"
+  encryptedPayload String   // AES-256-GCM encrypted JSON { text, html, atsScore?, matchedKeywords? }
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([userId, jobId, type])
 }
 
 model Session {

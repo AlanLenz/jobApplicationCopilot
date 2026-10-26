@@ -14,17 +14,21 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
+import { SearchFilters } from '@/components/SearchFilters';
 import {
-  SearchFilters,
+  DEFAULT_MAX_PAGES,
+  DEFAULT_SEARCH_FILTERS,
   SearchFilterState,
   buildPreviewLinkedInUrl,
-  ROLE_LABEL_MAP,
+  getRoleLabel,
   SENIORITY_OPTIONS,
   WORKPLACE_OPTIONS,
   TIME_RANGE_OPTIONS,
-} from '@/components/SearchFilters';
+} from '@/lib/search';
+import type { UserSettingsView } from '@/lib/settings-types';
 import { AuthModal, AuthUser } from '@/components/AuthModal';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
+import { SettingsPanel } from '@/components/SettingsPanel';
 import {
   Building2,
   FileText,
@@ -47,6 +51,8 @@ import {
   Trash2,
   RotateCcw,
   Calendar,
+  Settings2,
+  Target,
 } from 'lucide-react';
 
 type Job = {
@@ -118,29 +124,35 @@ type ScraperStatus = {
   message: string;
 };
 
-type ActiveMainTab = 'inbox' | 'applied' | 'searches' | 'profile';
+type ActiveMainTab = 'inbox' | 'applied' | 'searches' | 'profile' | 'settings';
+
+type ApiErrorPayload = { error?: string; code?: string };
 
 function DashboardContent() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
+  // Filters in the URL win; otherwise the user's saved defaults are applied once settings load.
+  const hasUrlFilters = useRef(searchParams.has('roles'));
+
   // Initialize filter state from URL query params
   const [filters, setFilters] = useState<SearchFilterState>(() => {
+    const defaults = DEFAULT_SEARCH_FILTERS;
     const rolesParam = searchParams.get('roles');
     const roles = rolesParam
       ? rolesParam.split(',').map((s) => s.trim()).filter(Boolean)
-      : ['software_engineer'];
-    const seniority = searchParams.get('seniority') || 'all';
+      : defaults.roles;
+    const seniority = searchParams.get('seniority') || defaults.seniority;
     const timeParam = searchParams.get('timeRange');
-    const timeRangeSeconds = timeParam !== null ? Number(timeParam) : 86400; // 24h default
-    const location = searchParams.get('location') || 'Worldwide';
-    const workplaceType = searchParams.get('workplace') || 'all';
+    const timeRangeSeconds = timeParam !== null ? Number(timeParam) : defaults.timeRangeSeconds;
+    const location = searchParams.get('location') ?? defaults.location;
+    const workplaceType = searchParams.get('workplace') || defaults.workplaceType;
 
     return {
-      roles: roles.length > 0 ? roles : ['software_engineer'],
+      roles: roles.length > 0 ? roles : defaults.roles,
       seniority,
-      timeRangeSeconds: Number.isNaN(timeRangeSeconds) ? 86400 : timeRangeSeconds,
+      timeRangeSeconds: Number.isNaN(timeRangeSeconds) ? defaults.timeRangeSeconds : timeRangeSeconds,
       location,
       workplaceType,
     };
@@ -151,7 +163,7 @@ function DashboardContent() {
     (newFilters: SearchFilterState) => {
       setFilters(newFilters);
       const params = new URLSearchParams(searchParams.toString());
-      params.set('roles', (newFilters.roles || ['software_engineer']).join(','));
+      params.set('roles', (newFilters.roles || DEFAULT_SEARCH_FILTERS.roles).join(','));
       params.set('seniority', newFilters.seniority);
       params.set('timeRange', String(newFilters.timeRangeSeconds));
       params.set('location', newFilters.location);
@@ -168,6 +180,14 @@ function DashboardContent() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'register'>('login');
+
+  // User preferences from the "Configurações" tab (null when logged out)
+  const [settings, setSettings] = useState<UserSettingsView | null>(null);
+  const customRoles = settings?.customRoles ?? [];
+
+  // AI job evaluation progress
+  const [evaluating, setEvaluating] = useState<{ done: number; remaining: number } | null>(null);
+  const [evaluationMessage, setEvaluationMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Data lists
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -247,11 +267,38 @@ function DashboardContent() {
     }
   }, []);
 
+  const fetchSettings = useCallback(async () => {
+    try {
+      const res = await fetch('/api/settings');
+      setSettings(res.ok ? await res.json() : null);
+    } catch (e) {
+      console.error('Failed to fetch settings:', e);
+    }
+  }, []);
+
   useEffect(() => {
     fetchAuthUser();
     fetchJobs();
     fetchUserHistories();
   }, [fetchAuthUser, fetchJobs, fetchUserHistories]);
+
+  useEffect(() => {
+    if (user) {
+      fetchSettings();
+    } else {
+      setSettings(null);
+    }
+  }, [user?.id, fetchSettings]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Apply the user's saved search defaults once, unless the URL already carries filters
+  const appliedSavedDefaults = useRef(false);
+  useEffect(() => {
+    if (!settings || appliedSavedDefaults.current) return;
+    appliedSavedDefaults.current = true;
+    if (hasUrlFilters.current) return;
+    const { roles, seniority, timeRangeSeconds, location, workplaceType } = settings.searchDefaults;
+    handleFiltersChange({ roles, seniority, timeRangeSeconds, location, workplaceType });
+  }, [settings, handleFiltersChange]);
 
   // Poll scraper status when it's running
   useEffect(() => {
@@ -286,6 +333,7 @@ function DashboardContent() {
       body: JSON.stringify({ action: 'logout' }),
     });
     setUser(null);
+    setSettings(null);
     setAppliedJobs([]);
     setSearchHistory([]);
     if (mainTab !== 'inbox') {
@@ -297,7 +345,7 @@ function DashboardContent() {
   const handleStartScraper = async (overrideFilters?: SearchFilterState) => {
     const activeFilters = overrideFilters || filters;
     try {
-      const targetUrl = buildPreviewLinkedInUrl(activeFilters);
+      const targetUrl = buildPreviewLinkedInUrl(activeFilters, customRoles);
       setScraperStatus((prev) => ({
         ...prev,
         status: 'running',
@@ -317,7 +365,7 @@ function DashboardContent() {
           timeRangeSeconds: activeFilters.timeRangeSeconds,
           location: activeFilters.location,
           workplaceType: activeFilters.workplaceType,
-          maxPages: 3,
+          maxPages: settings?.searchDefaults.maxPages ?? DEFAULT_MAX_PAGES,
         }),
       });
 
@@ -336,6 +384,75 @@ function DashboardContent() {
     }
   };
 
+  // Turns API error codes into a shortcut to the screen that fixes the problem
+  const handleApiError = (data: ApiErrorPayload, context: string) => {
+    const message = `${context}: ${data.error || 'erro desconhecido'}`;
+    if (data.code === 'AUTH_REQUIRED') {
+      setAuthInitialMode('login');
+      setAuthModalOpen(true);
+    } else if (data.code === 'PROFILE_REQUIRED') {
+      alert(message);
+      setMainTab('profile');
+    } else if (data.code === 'AI_NOT_CONFIGURED') {
+      if (confirm(`${message}\n\nAbrir a aba Configurações agora?`)) {
+        if (user) {
+          setMainTab('settings');
+        } else {
+          setAuthInitialMode('login');
+          setAuthModalOpen(true);
+        }
+      }
+    } else {
+      alert(message);
+    }
+  };
+
+  // Score pending jobs with the configured AI, in small batches until none are left
+  const handleEvaluateJobs = async () => {
+    if (!user) {
+      setAuthInitialMode('login');
+      setAuthModalOpen(true);
+      return;
+    }
+    setEvaluationMessage(null);
+    setEvaluating({ done: 0, remaining: jobs.filter((j) => j.matchScore === null).length });
+    let done = 0;
+    let discarded = 0;
+    try {
+      for (;;) {
+        const res = await fetch('/api/evaluate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ limit: 5 }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          handleApiError(data, 'Erro ao avaliar vagas');
+          break;
+        }
+        done += data.evaluated.length;
+        discarded += data.evaluated.filter((e: { discarded: boolean }) => e.discarded).length;
+        setEvaluating({ done, remaining: data.remaining });
+        fetchJobs();
+        if (data.failures.length > 0) {
+          setEvaluationMessage({ type: 'error', text: `Avaliação interrompida: ${data.failures[0].error}` });
+          break;
+        }
+        if (data.remaining === 0 || data.evaluated.length === 0) {
+          setEvaluationMessage({
+            type: 'success',
+            text: `${done} vaga(s) avaliada(s)${discarded > 0 ? `, ${discarded} descartada(s) abaixo da nota mínima` : ''}.`,
+          });
+          break;
+        }
+      }
+    } catch (e) {
+      setEvaluationMessage({ type: 'error', text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setEvaluating(null);
+    }
+  };
+
   // Generate Resume or Cover Letter using user's encrypted profile
   const handleGenerate = async (
     job: { id: string; title: string; company: string | null },
@@ -351,7 +468,10 @@ function DashboardContent() {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Generation failed');
+      if (!res.ok) {
+        handleApiError(data, `Erro ao gerar ${type === 'resume' ? 'Currículo' : 'Cover Letter'}`);
+        return;
+      }
 
       setActiveDoc({
         type,
@@ -450,7 +570,7 @@ function DashboardContent() {
 
   const handleRestoreSearch = (record: SearchHistoryRecord, runImmediately = false) => {
     const restored: SearchFilterState = {
-      roles: record.roles?.length > 0 ? record.roles : ['software_engineer'],
+      roles: record.roles?.length > 0 ? record.roles : DEFAULT_SEARCH_FILTERS.roles,
       seniority: record.seniority || 'all',
       timeRangeSeconds: record.timeRangeSeconds ?? 86400,
       location: record.location || 'Worldwide',
@@ -462,6 +582,10 @@ function DashboardContent() {
       handleStartScraper(restored);
     }
   };
+
+  // Highest AI match first; jobs not evaluated yet keep their newest-first order at the end
+  const minScore = settings?.evaluation.minScore ?? 70;
+  const sortedJobs = [...jobs].sort((a, b) => (b.matchScore ?? -1) - (a.matchScore ?? -1));
 
   if (loading) {
     return (
@@ -674,6 +798,29 @@ function DashboardContent() {
                 <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
               )}
             </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (!user) {
+                  setAuthInitialMode('login');
+                  setAuthModalOpen(true);
+                  return;
+                }
+                setMainTab('settings');
+              }}
+              className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                mainTab === 'settings'
+                  ? 'bg-background text-foreground shadow-sm border'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <Settings2 className="w-4 h-4 text-violet-600" />
+              <span>Configurações</span>
+              {settings && !settings.ai.effective.ready && (
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" title="IA não configurada" />
+              )}
+            </button>
           </div>
 
           {user && !user.hasResume && mainTab !== 'profile' && (
@@ -696,6 +843,8 @@ function DashboardContent() {
               filters={filters}
               onChange={handleFiltersChange}
               disabled={scraperStatus.status === 'running'}
+              customRoles={customRoles}
+              locationSuggestions={settings?.locationSuggestions}
             />
 
             {/* Job Listings Header */}
@@ -711,15 +860,48 @@ function DashboardContent() {
                   Vagas recusadas são descartadas imediatamente sem poluir seu histórico. Vagas aplicadas ficam salvas na aba &quot;Vagas Aplicadas&quot;.
                 </p>
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={fetchJobs}
-                className="text-xs text-muted-foreground gap-1.5"
-              >
-                <RefreshCw className="w-3.5 h-3.5" /> Atualizar Lista
-              </Button>
+              <div className="flex items-center gap-2 shrink-0">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleEvaluateJobs}
+                  disabled={evaluating !== null || jobs.length === 0}
+                  className="text-xs gap-1.5"
+                  title="Dá uma nota de 0 a 100 para cada vaga com base no seu perfil e nos critérios definidos em Configurações"
+                >
+                  {evaluating ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Avaliando... ({evaluating.done} feitas, {evaluating.remaining} restantes)
+                    </>
+                  ) : (
+                    <>
+                      <Target className="w-3.5 h-3.5 text-emerald-600" /> Avaliar com IA
+                    </>
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={fetchJobs}
+                  className="text-xs text-muted-foreground gap-1.5"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Atualizar Lista
+                </Button>
+              </div>
             </div>
+
+            {evaluationMessage && (
+              <div
+                className={`p-3 rounded-md border text-xs ${
+                  evaluationMessage.type === 'success'
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-400'
+                }`}
+              >
+                {evaluationMessage.text}
+              </div>
+            )}
 
             {jobs.length === 0 ? (
               <Card className="p-12 text-center text-muted-foreground flex flex-col items-center gap-3">
@@ -738,7 +920,7 @@ function DashboardContent() {
               </Card>
             ) : (
               <div className="flex flex-col gap-4">
-                {jobs.map((job) => {
+                {sortedJobs.map((job) => {
                   const isResumeGenerating =
                     isGenerating?.id === job.id && isGenerating?.type === 'resume';
                   const isCoverGenerating =
@@ -760,8 +942,11 @@ function DashboardContent() {
                           <Badge variant="secondary" className="text-xs font-semibold">
                             Nova
                           </Badge>
-                          {job.matchScore !== null && job.matchScore > 0 && (
-                            <Badge variant="default" className="text-xs bg-emerald-600">
+                          {job.matchScore !== null && (
+                            <Badge
+                              variant="default"
+                              className={`text-xs ${job.matchScore >= minScore ? 'bg-emerald-600' : 'bg-slate-500'}`}
+                            >
                               {job.matchScore}% Match
                             </Badge>
                           )}
@@ -771,6 +956,12 @@ function DashboardContent() {
                           <Building2 className="w-4 h-4 text-slate-500 shrink-0" />
                           <span className="truncate">{job.company || 'Empresa não informada'}</span>
                         </div>
+                        {job.matchReason && (
+                          <p className="text-xs text-muted-foreground leading-relaxed line-clamp-2" title={job.matchReason}>
+                            <Sparkles className="w-3 h-3 inline mr-1 text-primary" />
+                            {job.matchReason}
+                          </p>
+                        )}
                       </div>
 
                       <div className="flex items-center flex-wrap gap-2 justify-end">
@@ -1131,9 +1322,9 @@ function DashboardContent() {
                       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
                         <div className="space-y-1.5 flex-1">
                           <div className="flex items-center flex-wrap gap-1.5">
-                            {(item.roles || ['software_engineer']).map((r) => (
+                            {(item.roles || DEFAULT_SEARCH_FILTERS.roles).map((r) => (
                               <Badge key={r} variant="default" className="text-[11px]">
-                                {ROLE_LABEL_MAP[r] || r}
+                                {getRoleLabel(r, customRoles)}
                               </Badge>
                             ))}
                             <Badge variant="secondary" className="text-[11px]">
@@ -1203,6 +1394,17 @@ function DashboardContent() {
               </div>
             )}
           </div>
+        )}
+
+        {/* ==================== TAB 5: CONFIGURAÇÕES ==================== */}
+        {mainTab === 'settings' && (
+          settings ? (
+            <SettingsPanel settings={settings} onSaved={setSettings} />
+          ) : (
+            <Card className="p-8 flex items-center justify-center text-sm text-muted-foreground gap-2">
+              <Loader2 className="w-4 h-4 animate-spin text-primary" /> Carregando configurações...
+            </Card>
+          )
         )}
 
         {/* ==================== TAB 4: MEU PERFIL PROFISSIONAL & SEGURANÇA ==================== */}

@@ -1,14 +1,16 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenAI } from '@google/genai';
+import { extractText, getDocumentProxy } from 'unpdf';
 import { prisma } from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 import { encryptUserData, decryptUserData } from '@/lib/security';
-
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || '',
-});
+import { resolveAIConfigForUser } from '@/lib/settings';
+import { AIConfig, AIConfigError, generateText, providerSupportsPdf } from '@/lib/ai/client';
+import { aiErrorResponse } from '@/lib/ai/http';
+import { buildProfileExtractionPrompt } from '@/lib/ai/prompts';
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+// Below this many characters we assume the PDF is scanned (images only, no text layer).
+const MIN_PDF_TEXT_LENGTH = 200;
 
 export async function GET() {
   try {
@@ -73,8 +75,8 @@ export async function POST(request: Request) {
         extractedText = buffer.toString('utf-8').trim();
         sourceLabel = uploadType === 'linkedin' ? `LinkedIn (${fileName})` : `Currículo (${fileName})`;
       } else if (lowerName.endsWith('.pdf') || file.type === 'application/pdf') {
-        const base64Pdf = buffer.toString('base64');
-        extractedText = await extractProfileFromPdfInMemory(base64Pdf, uploadType === 'linkedin');
+        const aiConfig = await resolveAIConfigForUser(user);
+        extractedText = await extractProfileFromPdfInMemory(buffer, uploadType === 'linkedin', aiConfig);
         sourceLabel = uploadType === 'linkedin' ? `LinkedIn PDF (${fileName})` : `Currículo PDF (${fileName})`;
       } else {
         return NextResponse.json(
@@ -115,12 +117,9 @@ export async function POST(request: Request) {
       resumeSource: sourceLabel,
       resumeUpdatedAt: now.toISOString(),
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Profile POST error:', error);
-    return NextResponse.json(
-      { error: error.message || 'Falha ao processar e criptografar as informações profissionais.' },
-      { status: 500 }
-    );
+    return aiErrorResponse(error, 'Falha ao processar e criptografar as informações profissionais.');
   }
 }
 
@@ -150,32 +149,44 @@ export async function DELETE() {
   }
 }
 
-async function extractProfileFromPdfInMemory(base64Pdf: string, isLinkedInExport: boolean): Promise<string> {
-  const prompt = isLinkedInExport
-    ? `Extract the complete professional profile from this LinkedIn PDF export.
-Preserve ALL details faithfully: Full Name, Headline, Contact Info, Location, Summary/About, All Work Experiences (Company, Role, Dates, Location, Full Description & Achievements), Education, Certifications, Technical Skills, and Languages.
-Do not invent or omit any information. Return clean, well-structured plain text / markdown suitable as a Master Resume Profile.`
-    : `Extract the complete content of this Resume / CV PDF document.
-Preserve ALL details faithfully: Full Name, Contact Info, Links (LinkedIn, GitHub, Portfolio), Professional Summary, All Work Experiences (Company, Role, Dates, Bullet points & Metrics), Education, Technical Skills, Certifications, Projects, and Languages.
-Do not invent or omit any information. Return clean, well-structured plain text / markdown suitable as a Master Resume Profile.`;
+/**
+ * PDF -> profile text, entirely in memory.
+ *
+ * 1. The text layer is extracted locally (unpdf), so any model works, even text-only
+ *    local models through Ollama/LM Studio.
+ * 2. The configured LLM then rebuilds a clean, structured profile from that raw text.
+ * 3. Scanned PDFs (no text layer) are sent as-is to providers that read PDFs natively
+ *    (Gemini, Claude); for other providers the user gets a clear message.
+ */
+async function extractProfileFromPdfInMemory(
+  buffer: Buffer,
+  isLinkedInExport: boolean,
+  aiConfig: AIConfig | null
+): Promise<string> {
+  let rawText = '';
+  try {
+    const pdf = await getDocumentProxy(new Uint8Array(buffer));
+    rawText = (await extractText(pdf, { mergePages: true })).text.trim();
+  } catch (error) {
+    console.warn('Local PDF text extraction failed, falling back to the AI provider:', error);
+  }
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          {
-            inlineData: {
-              mimeType: 'application/pdf',
-              data: base64Pdf,
-            },
-          },
-          { text: prompt },
-        ],
-      },
-    ],
+  if (rawText.length >= MIN_PDF_TEXT_LENGTH) {
+    const structured = await generateText(aiConfig, {
+      prompt: buildProfileExtractionPrompt(isLinkedInExport, rawText),
+    });
+    return structured.trim() || rawText;
+  }
+
+  if (aiConfig && !providerSupportsPdf(aiConfig)) {
+    throw new AIConfigError(
+      'Este PDF parece ser escaneado (sem texto selecionável) e o provedor de IA configurado não lê PDFs. Use Gemini ou Claude, envie um .txt/.md, ou cole o conteúdo no editor.'
+    );
+  }
+
+  const structured = await generateText(aiConfig, {
+    prompt: buildProfileExtractionPrompt(isLinkedInExport),
+    pdfBase64: buffer.toString('base64'),
   });
-
-  return (response.text || '').trim();
+  return structured.trim();
 }
