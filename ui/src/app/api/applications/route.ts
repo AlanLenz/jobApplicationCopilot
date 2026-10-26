@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
-import { encryptUserData, decryptUserData } from '@/lib/security';
-import { getGeneratedDocument } from '@/lib/storage';
+import { encryptUserData } from '@/lib/security';
+import { decryptDocument, getGeneratedDocument } from '@/lib/documents';
 
 export async function GET() {
   try {
@@ -17,30 +17,8 @@ export async function GET() {
     });
 
     const applications = rawApplications.map((app) => {
-      let customResume = null;
-      let coverLetter = null;
-
-      if (app.encryptedCustomResume) {
-        const decrypted = decryptUserData(app.encryptedCustomResume, user.id);
-        if (decrypted) {
-          try {
-            customResume = JSON.parse(decrypted);
-          } catch {
-            customResume = { text: decrypted, html: `<pre>${decrypted}</pre>` };
-          }
-        }
-      }
-
-      if (app.encryptedCoverLetter) {
-        const decrypted = decryptUserData(app.encryptedCoverLetter, user.id);
-        if (decrypted) {
-          try {
-            coverLetter = JSON.parse(decrypted);
-          } catch {
-            coverLetter = { text: decrypted, html: `<pre>${decrypted}</pre>` };
-          }
-        }
-      }
+      const customResume = decryptDocument(app.encryptedCustomResume, user.id);
+      const coverLetter = decryptDocument(app.encryptedCoverLetter, user.id);
 
       return {
         id: app.id,
@@ -106,11 +84,11 @@ export async function POST(request: Request) {
     let encryptedCoverLetter: string | undefined;
 
     if (jobId) {
-      const resumeDoc = getGeneratedDocument(`${user.id}_${jobId}`, 'resume') || getGeneratedDocument(jobId, 'resume');
+      const resumeDoc = await getGeneratedDocument(user.id, jobId, 'resume');
       if (resumeDoc) {
         encryptedCustomResume = encryptUserData(JSON.stringify(resumeDoc), user.id);
       }
-      const coverDoc = getGeneratedDocument(`${user.id}_${jobId}`, 'cover_letter') || getGeneratedDocument(jobId, 'cover_letter');
+      const coverDoc = await getGeneratedDocument(user.id, jobId, 'cover_letter');
       if (coverDoc) {
         encryptedCoverLetter = encryptUserData(JSON.stringify(coverDoc), user.id);
       }

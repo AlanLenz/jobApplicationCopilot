@@ -1,32 +1,43 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenAI } from '@google/genai';
 import { prisma } from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 import { decryptUserData, encryptUserData } from '@/lib/security';
+import { resolveAIConfigForUser } from '@/lib/settings';
+import { getGeneratedDocument, saveGeneratedDocument, escapeHtml, DocumentType } from '@/lib/documents';
+import { AIConfig, generateJSON } from '@/lib/ai/client';
+import { aiErrorResponse } from '@/lib/ai/http';
 import {
-  saveGeneratedDocument,
-  getGeneratedDocument,
-  getMasterResume,
-} from '@/lib/storage';
+  COVER_LETTER_SCHEMA,
+  CoverLetter,
+  JobForPrompt,
+  TAILORED_RESUME_SCHEMA,
+  TailoredResume,
+  buildCoverLetterPrompt,
+  buildTailoredResumePrompt,
+} from '@/lib/ai/prompts';
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || '',
-});
+const MIN_PROFILE_LENGTH = 20;
+
+function isDocumentType(value: unknown): value is DocumentType {
+  return value === 'resume' || value === 'cover_letter';
+}
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const jobId = searchParams.get('jobId');
-    const type = searchParams.get('type') as 'resume' | 'cover_letter' | null;
+    const type = searchParams.get('type');
 
-    if (!jobId || !type) {
+    if (!jobId || !isDocumentType(type)) {
       return NextResponse.json({ error: 'jobId and type (resume | cover_letter) are required' }, { status: 400 });
     }
 
     const user = await getCurrentUser();
-    const cacheKey = user ? `${user.id}_${jobId}` : jobId;
+    if (!user) {
+      return NextResponse.json({ found: false }, { status: 404 });
+    }
 
-    const doc = getGeneratedDocument(cacheKey, type) || getGeneratedDocument(jobId, type);
+    const doc = await getGeneratedDocument(user.id, jobId, type);
     if (!doc) {
       return NextResponse.json({ found: false }, { status: 404 });
     }
@@ -43,49 +54,37 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { jobId, type, regenerate = false } = body;
 
-    if (!jobId || !type || !['resume', 'cover_letter'].includes(type)) {
+    if (!jobId || !isDocumentType(type)) {
       return NextResponse.json({ error: 'Valid jobId and type (resume | cover_letter) required' }, { status: 400 });
     }
 
     const user = await getCurrentUser();
-    const cacheKey = user ? `${user.id}_${jobId}` : jobId;
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Faça login para gerar documentos personalizados com o seu perfil.', code: 'AUTH_REQUIRED' },
+        { status: 401 }
+      );
+    }
 
     // Check cache first unless explicitly regenerating
     if (!regenerate) {
-      const existing = getGeneratedDocument(cacheKey, type);
+      const existing = await getGeneratedDocument(user.id, jobId, type);
       if (existing) {
-        return NextResponse.json({
-          success: true,
-          cached: true,
-          jobId,
-          type,
-          ...existing,
-        });
+        return NextResponse.json({ success: true, cached: true, jobId, type, ...existing });
       }
     }
 
     // Fetch Job details (either from Job inbox or user's AppliedJob history)
-    let job: {
-      id: string;
-      title: string;
-      company: string | null;
-      url: string;
-      description: string;
-      requirements?: string | null;
-    } | null = await prisma.job.findUnique({
+    let job: (JobForPrompt & { url: string }) | null = await prisma.job.findUnique({
       where: { id: jobId },
     });
 
-    if (!job && user) {
+    if (!job) {
       const applied = await prisma.appliedJob.findFirst({
-        where: {
-          userId: user.id,
-          OR: [{ id: jobId }, { jobId }],
-        },
+        where: { userId: user.id, OR: [{ id: jobId }, { jobId }] },
       });
       if (applied) {
         job = {
-          id: applied.jobId || applied.id,
           title: applied.title,
           company: applied.company,
           url: applied.url,
@@ -99,208 +98,100 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `Vaga não encontrada (${jobId})` }, { status: 404 });
     }
 
-    // Resolve the user's decrypted professional profile first; fallback to local resume.txt only if not uploaded
-    let masterResume = '';
-    let profileSource = 'Currículo Padrão Local';
-
-    if (user && user.encryptedResume) {
-      const decrypted = decryptUserData(user.encryptedResume, user.id);
-      if (decrypted && decrypted.trim().length > 20) {
-        masterResume = decrypted;
-        profileSource = user.resumeSource || 'Perfil Criptografado do Usuário';
-      }
+    // Generation is grounded on the user's own encrypted profile. The old fallback to a
+    // local resume.txt / resume.example.txt silently produced documents for "John Doe".
+    const masterResume = decryptUserData(user.encryptedResume, user.id) || '';
+    if (masterResume.trim().length < MIN_PROFILE_LENGTH) {
+      return NextResponse.json(
+        {
+          error: 'Envie seu currículo ou PDF do LinkedIn na aba "Meu Perfil" antes de gerar documentos.',
+          code: 'PROFILE_REQUIRED',
+        },
+        { status: 400 }
+      );
     }
+    const profileSource = user.resumeSource || 'Perfil Criptografado do Usuário';
 
-    if (!masterResume) {
-      masterResume = getMasterResume();
-    }
+    const aiConfig = await resolveAIConfigForUser(user);
 
     if (type === 'resume') {
-      const resumeResult = await generateTailoredResume(job, masterResume);
-
-      saveGeneratedDocument(cacheKey, 'resume', resumeResult.plainText, resumeResult.html);
+      const resume = await generateTailoredResume(aiConfig, job, masterResume);
+      const doc = {
+        text: resume.plainText,
+        html: resume.html,
+        atsScore: resume.atsScore,
+        matchedKeywords: resume.matchedKeywords,
+      };
+      await saveGeneratedDocument(user.id, jobId, 'resume', doc);
 
       // Update encrypted document on AppliedJob if user already applied
-      if (user) {
-        const encryptedDoc = encryptUserData(
-          JSON.stringify({
-            text: resumeResult.plainText,
-            html: resumeResult.html,
-            atsScore: resumeResult.atsScore,
-            matchedKeywords: resumeResult.matchedKeywords,
-          }),
-          user.id
-        );
-        await prisma.appliedJob
-          .updateMany({
-            where: { userId: user.id, OR: [{ jobId }, { url: job.url }] },
-            data: {
-              encryptedCustomResume: encryptedDoc,
-              atsScore: resumeResult.atsScore,
-            },
-          })
-          .catch(() => {});
-      }
+      await prisma.appliedJob
+        .updateMany({
+          where: { userId: user.id, OR: [{ jobId }, { url: job.url }] },
+          data: {
+            encryptedCustomResume: encryptUserData(JSON.stringify(doc), user.id),
+            atsScore: resume.atsScore,
+          },
+        })
+        .catch(() => {});
 
-      return NextResponse.json({
-        success: true,
-        cached: false,
-        jobId,
-        type: 'resume',
-        profileSource,
-        text: resumeResult.plainText,
-        html: resumeResult.html,
-        atsScore: resumeResult.atsScore,
-        matchedKeywords: resumeResult.matchedKeywords,
-      });
+      return NextResponse.json({ success: true, cached: false, jobId, type, profileSource, ...doc });
     }
 
-    if (type === 'cover_letter') {
-      const coverLetterResult = await generateCoverLetter(job, masterResume);
+    const coverLetter = await generateCoverLetter(aiConfig, job, masterResume);
+    const doc = { text: coverLetter.plainText, html: coverLetter.html };
+    await saveGeneratedDocument(user.id, jobId, 'cover_letter', doc);
 
-      saveGeneratedDocument(cacheKey, 'cover_letter', coverLetterResult.plainText, coverLetterResult.html);
+    await prisma.appliedJob
+      .updateMany({
+        where: { userId: user.id, OR: [{ jobId }, { url: job.url }] },
+        data: { encryptedCoverLetter: encryptUserData(JSON.stringify(doc), user.id) },
+      })
+      .catch(() => {});
 
-      if (user) {
-        const encryptedDoc = encryptUserData(
-          JSON.stringify({
-            text: coverLetterResult.plainText,
-            html: coverLetterResult.html,
-          }),
-          user.id
-        );
-        await prisma.appliedJob
-          .updateMany({
-            where: { userId: user.id, OR: [{ jobId }, { url: job.url }] },
-            data: { encryptedCoverLetter: encryptedDoc },
-          })
-          .catch(() => {});
-      }
-
-      return NextResponse.json({
-        success: true,
-        cached: false,
-        jobId,
-        type: 'cover_letter',
-        profileSource,
-        text: coverLetterResult.plainText,
-        html: coverLetterResult.html,
-      });
-    }
-
-    return NextResponse.json({ error: 'Unsupported type' }, { status: 400 });
-  } catch (error: any) {
+    return NextResponse.json({ success: true, cached: false, jobId, type, profileSource, ...doc });
+  } catch (error) {
     console.error('Error generating document:', error);
-    return NextResponse.json({ error: error.message || 'Generation failed' }, { status: 500 });
+    return aiErrorResponse(error, 'Falha ao gerar o documento.');
   }
 }
 
-async function generateTailoredResume(job: any, masterResume: string) {
-  const prompt = `
-You are an elite Technical Resume Optimizer & ATS Specialist adhering to the resume-ats-optimizer skill.
-Tailor the candidate's master resume to maximize ATS match score and impress human hiring managers for the following job description.
-
-Candidate Master Profile / Resume:
-${masterResume}
-
-Target Job Title: ${job.title}
-Target Company: ${job.company || 'Confidential'}
-Job Description & Requirements:
-${job.description}
-${job.requirements ? `Requirements: ${job.requirements}` : ''}
-
-Strict Rules:
-1. Do NOT fabricate experience, dates, or degrees. Maintain all verified roles, achievements, and degrees as provided in the master resume.
-2. Detect the language of the Job Description (Portuguese or English) and write the tailored resume in the SAME language as the job posting (unless the job explicitly asks for English).
-3. Optimize the Professional Summary to directly speak to the target role's core mission and tech stack.
-4. Align Technical Skills with the exact terminology in the job description (e.g. if Vue.js, Spring Boot, TypeScript, Docker are required, emphasize them explicitly).
-5. Frame the bullet points of past experience to highlight relevant achievements, quantified metrics, and tools mentioned in the job description.
-6. Provide a single-column plain text format AND an elegant, clean HTML template formatted for A4 print.
-
-Return a valid JSON object matching this schema:
-{
-  "atsScore": number (0-100),
-  "matchedKeywords": string[],
-  "plainText": string,
-  "html": string
-}
-`;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
-    contents: prompt,
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: 'object',
-        properties: {
-          atsScore: { type: 'integer' },
-          matchedKeywords: { type: 'array', items: { type: 'string' } },
-          plainText: { type: 'string' },
-          html: { type: 'string' },
-        },
-        required: ['atsScore', 'matchedKeywords', 'plainText', 'html'],
-      },
-    },
+async function generateTailoredResume(
+  config: AIConfig | null,
+  job: JobForPrompt,
+  masterResume: string
+): Promise<TailoredResume> {
+  const parsed = await generateJSON<Partial<TailoredResume>>(config, {
+    prompt: buildTailoredResumePrompt(job, masterResume),
+    schema: TAILORED_RESUME_SCHEMA,
   });
-
-  const parsed = JSON.parse(response.text || '{}');
+  const plainText = parsed.plainText || '';
   return {
-    atsScore: parsed.atsScore || 90,
-    matchedKeywords: parsed.matchedKeywords || [],
-    plainText: parsed.plainText || '',
-    html: parsed.html || `<pre>${parsed.plainText}</pre>`,
+    atsScore: clampScore(parsed.atsScore),
+    matchedKeywords: Array.isArray(parsed.matchedKeywords) ? parsed.matchedKeywords.map(String) : [],
+    plainText,
+    html: parsed.html || `<pre>${escapeHtml(plainText)}</pre>`,
   };
 }
 
-async function generateCoverLetter(job: any, masterResume: string) {
-  const prompt = `
-You are a professional Career Coach & Cover Letter Specialist adhering to the cover-letter-generator skill.
-Write a targeted, highly persuasive cover letter for this candidate and target job.
-
-Candidate Profile / Resume:
-${masterResume}
-
-Target Job:
-Role: ${job.title}
-Company: ${job.company || 'Hiring Team'}
-Description:
-${job.description}
-
-Cover Letter Structure Guidelines:
-1. Detect the language of the Job Description (Portuguese or English) and write the cover letter in the SAME language as the job posting.
-2. Length: 250-380 words (3-4 focused paragraphs).
-3. Opening Hook: 2-3 sentences. Start with company knowledge or their specific technical challenge/value stream. Avoid generic openers.
-4. Body Paragraph 1 (Core Match): Connect the candidate's strongest relevant experience, project metrics, and technical expertise from the master resume.
-5. Body Paragraph 2 (Value Add & Mindset): Highlight problem-solving ownership, stakeholder collaboration, and modern development workflows.
-6. Closing Paragraph: Enthusiastic call to action, referencing relevant communication strengths and eagerness to contribute.
-7. Provide clean plain text (with date and contact info) AND clean, printable HTML.
-
-Return a valid JSON object matching this schema:
-{
-  "plainText": string,
-  "html": string
-}
-`;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
-    contents: prompt,
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: 'object',
-        properties: {
-          plainText: { type: 'string' },
-          html: { type: 'string' },
-        },
-        required: ['plainText', 'html'],
-      },
-    },
+async function generateCoverLetter(
+  config: AIConfig | null,
+  job: JobForPrompt,
+  masterResume: string
+): Promise<CoverLetter> {
+  const parsed = await generateJSON<Partial<CoverLetter>>(config, {
+    prompt: buildCoverLetterPrompt(job, masterResume),
+    schema: COVER_LETTER_SCHEMA,
   });
-
-  const parsed = JSON.parse(response.text || '{}');
+  const plainText = parsed.plainText || '';
   return {
-    plainText: parsed.plainText || '',
-    html: parsed.html || `<pre>${parsed.plainText}</pre>`,
+    plainText,
+    html: parsed.html || `<pre>${escapeHtml(plainText)}</pre>`,
   };
+}
+
+function clampScore(value: unknown): number {
+  const n = Number(value);
+  // The previous implementation defaulted a missing score to 90, overstating the match.
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : 0;
 }
